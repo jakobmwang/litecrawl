@@ -134,23 +134,26 @@ def fetch_data(url: str, timeout: float = 30.0) -> dict[str, Any] | None:
 
 ---
 
+## Imports, Versions, and API Changes
+
+* **Always verify the latest version and documentation** of any external package **before using, importing, or pinning** it.
+* **Check import paths and module layouts**—packages frequently reorganize modules between minor versions.
+* When adding code that relies on a package:
+  * Confirm that the API, class names, and function signatures match the current stable docs.
+  * Prefer **explicit version pinning** only after verifying compatibility.
+* When upgrading a dependency:
+  * Re-check imports and public APIs for breaking changes.
+  * Update code accordingly and run the full quality gate (`ruff` + `pytest`).
+
+**Goal:** Prevent stale imports, avoid deprecated APIs, and ensure builds remain reproducible across environments.
+
+---
+
 ## Asynchronous Code
 
 * Use `async`/`await` for I/O-bound operations.
 * Be consistent in using `asyncio` patterns.
-* Use modern async HTTP clients (e.g., `httpx.AsyncClient`).
 * Always properly `await` coroutines; avoid fire-and-forget unless explicitly intentional and documented.
-
-Example:
-
-```python
-async def fetch_multiple(urls: list[str]) -> list[dict[str, Any]]:
-    """Fetch data from multiple URLs concurrently."""
-    async with httpx.AsyncClient() as client:
-        tasks = [client.get(url) for url in urls]
-        responses = await asyncio.gather(*tasks)
-        return [response.json() for response in responses]
-```
 
 ---
 

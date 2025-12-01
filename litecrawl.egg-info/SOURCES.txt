@@ -1,0 +1,10 @@
+PROJECT.md
+pyproject.toml
+litecrawl.egg-info/PKG-INFO
+litecrawl.egg-info/SOURCES.txt
+litecrawl.egg-info/dependency_links.txt
+litecrawl.egg-info/requires.txt
+litecrawl.egg-info/top_level.txt
+tests/test_frontier.py
+tests/test_scheduling.py
+tests/test_url_rules.py

@@ -1,3 +1,19 @@
+Metadata-Version: 2.4
+Name: litecrawl
+Version: 0.1.0
+Summary: Minimal asynchronous Playwright-based web crawler
+Author: litecrawl contributors
+License: Apache-2.0
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: playwright<1.50.0,>=1.44.0
+Requires-Dist: httpx<0.28.0,>=0.27.0
+Requires-Dist: beautifulsoup4<5.0.0,>=4.12.3
+Provides-Extra: dev
+Requires-Dist: pytest<9.0.0,>=8.2.0; extra == "dev"
+Requires-Dist: pytest-asyncio<0.24.0,>=0.23.7; extra == "dev"
+Requires-Dist: ruff<0.6.0,>=0.5.0; extra == "dev"
+
 # litecrawl – Minimal asynchronous Playwright-based web crawler
 
 A single-file, cron-friendly crawler with its own SQLite frontier, Playwright rendering (with scrolling), robots.txt compliance, simple adaptive scheduling, and a pluggable content cleaner.
@@ -248,3 +264,13 @@ Run example.py every minute with a hard wall-clock limit:
 * **Change** = new valid link OR cleaned content string changed.
 * **Scheduling** = multiply prev interval (0.2 on change, 2.0 on no change by default), then clamp.
 * **Logs** + `status_code` provide diagnostics.
+
+---
+
+## Repository Layout
+
+* `pyproject.toml` – uv-compatible project definition with runtime/dev dependencies.
+* `src/litecrawl.py` – single module that implements the `litecrawl()` entry point, SQLite frontier,
+  Playwright fetching, normalization, scheduling, and link storage.
+* `example.py` – runnable sample that wires the crawler with bare-minimum parameters.
+* `tests/` – pytest suite covering URL gating, scheduling math, and SQLite frontier behavior.
