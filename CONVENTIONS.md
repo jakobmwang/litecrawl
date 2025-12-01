@@ -70,6 +70,7 @@ uv run pytest
 * Fix formatter/linter issues before committing.
 * All tests **must pass** before pushing.
 * If tests fail, fix them immediately—do not commit failing tests.
+* Keep a tight `.gitignore` to avoid any unnecessary clutter in the repository.
 
 ---
 
