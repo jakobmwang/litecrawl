@@ -1,4 +1,3 @@
-```markdown
 # litecrawl
 
 **A minimal, asynchronous, concurrency-safe web crawler.**
@@ -140,4 +139,3 @@ litecrawl(
 ## License
 
 MIT
-```
