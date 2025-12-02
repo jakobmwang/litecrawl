@@ -1,5 +1,4 @@
 .env
-litecrawl.egg-info
 __pycache__
 .pytest_cache
 .uv-cache
