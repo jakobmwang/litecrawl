@@ -1,8 +1,6 @@
 import logging
 from pathlib import Path
-
 from lxml import html
-
 from litecrawl import litecrawl
 
 
