@@ -15,11 +15,16 @@ The architecture follows a "crash-only" software philosophy. It assumes the proc
 
 ## Installation
 
-Requires Python 3.8+ and Playwright.
+Requires Python 3.12+ and Playwright.
 
 ```bash
-pip install aiosqlite playwright lxml
-playwright install chromium
+# Recommended (uv)
+uv add litecrawl
+uv run playwright install chromium
+
+# Or pip
+pip install litecrawl
+python -m playwright install chromium
 ```
 
 ## Quick Start
@@ -54,62 +59,130 @@ To run the crawler continuously, set up a cron job. We wrap the execution in `ti
 
 ```bash
 # Run every minute. Kills the process if it exceeds 10 minutes.
-* * * * * /usr/bin/timeout 10m /usr/bin/python3 /path/to/crawler.py >> /var/log/crawl.log 2>&1
+* * * * * cd /path/to/project && /usr/bin/timeout 10m uv run python crawler.py >> /var/log/crawl.log 2>&1
 ```
 
-## Core Features
+## Configuration Reference
 
-### 1. Robust Normalization & Discovery
-URLs are the primary key. `litecrawl` automatically standardizes URLs (sorting query parameters, stripping fragments) to prevent duplication. It creates a directed graph where `last_inlink_seen_time` helps prune orphaned pages that are no longer linked by the target site.
+`litecrawl` is configured entirely through arguments passed to the main function. There are no configuration files to manage.
 
-### 2. Security (SSRF Protection)
-When configured with `check_ssrf=True` (default), the crawler performs DNS resolution to ensure it does not connect to private IP ranges (e.g., `127.0.0.1`, `10.0.0.0/8`). This is essential when running crawlers on infrastructure that has access to internal services.
+### Targeting & Discovery
+| Parameter | Type | Description |
+| :--- | :--- | :--- |
+| `sqlite_path` | `str` | Path to the SQLite DB. Created automatically if missing. |
+| `start_urls` | `list[str]` | Entry points. Always re-injected on every run to ensure the root is alive. |
+| `include_patterns` | `list[str]` | Regex list. Only links matching these are added to the DB. |
+| `exclude_patterns` | `list[str]` | Regex list. Links matching these are ignored. |
+| `normalize_patterns` | `list[dict]` | Regex replacements (`{"pattern": "...", "replace": "..."}`) applied to URLs before storage. |
+| `check_robots_txt` | `bool` | If `True` (default), respects robots.txt rules. |
+| `check_ssrf` | `bool` | If `True` (default), prevents connections to private/local IP addresses. |
 
-### 3. Change Detection
-It computes a stable SHA-256 hash of the page content.
-*   **Fresh:** If the hash changes or new links are discovered, the page is marked "fresh," and the interval to the next crawl is reduced.
-*   **Stale:** If the hash remains identical, the interval is increased (backed off) to save resources.
+### Scheduling & Operations
+| Parameter | Type | Description |
+| :--- | :--- | :--- |
+| `n_claims` | `int` | Maximum number of pages to process in one execution. |
+| `n_concurrent` | `int` | Number of parallel browser tabs. |
+| `fresh_factor` | `float` | Multiplier (< 1.0) to reduce interval if content changes (e.g., 0.5 = crawl twice as often). |
+| `stale_factor` | `float` | Multiplier (> 1.0) to increase interval if content is static (e.g., 2.0 = wait twice as long). |
+| `new_interval_sec` | `int` | Initial crawl interval for newly discovered pages (default: 24h). |
+| `min_interval_sec` | `int` | Minimum time between crawls (floor). |
+| `max_interval_sec` | `int` | Maximum time between crawls (ceiling). |
 
-### 4. Hook System
-You can inject custom logic without modifying the core library:
+### Browser Control
+| Parameter | Type | Description |
+| :--- | :--- | :--- |
+| `pw_headers` | `dict` | HTTP headers (e.g., User-Agent, Cookies). |
+| `pw_viewport` | `dict` | Viewport size (default: 1080p). |
+| `pw_block_resources` | `set` | Resource types to abort (default: `{"image", "font", "media"}`). |
+| `pw_scroll_rounds` | `int` | How many times to scroll to bottom before extracting (for infinite scroll). |
+| `pw_timeout_ms` | `int` | Page load timeout in milliseconds. |
 
-*   **`page_ready_hook`**: Run actions after the page loads but before extraction (e.g., clicking "Load More", logging in, handling cookie banners).
-*   **`link_extract_hook`**: Override default link discovery (e.g., extracting URLs from JSON blobs).
-*   **`content_extract_hook`**: Define exactly what data to save (e.g., returning a specific DOM element or a structured dict).
-*   **`downstream_hook`**: An async callback triggered immediately after a successful crawl. Use this to push data to an API, Kafka, or S3.
+## Advanced Usage
 
-## Use Case Examples
+`litecrawl` shines when you need precise control over what constitutes "content" and how it flows downstream.
 
-### The "News Monitor"
-Targeting a high-frequency news feed.
-*   **Strategy:** Aggressive `fresh_factor`, specific inclusion patterns.
-*   **Config:**
-    ```python
-    litecrawl(
-        ...,
-        fresh_factor=0.2,   # Check 5x more often if it changed
-        min_interval_sec=300,
-        include_patterns=[r"/breaking-news/"]
-    )
-    ```
+### 1. Separation of Navigation and Payload
 
-### The "Intranet Archivist"
-Crawling internal documentation for search indexing.
-*   **Strategy:** Disable SSRF checks (to allow internal IPs), long intervals, authentication via hooks.
-*   **Config:**
-    ```python
-    async def login(page):
-        # Custom login logic
-        ...
+By default, the crawler saves the raw HTML body. However, you often want to traverse one set of pages (e.g., listing pages) but only extract data from another set (e.g., article pages).
 
-    litecrawl(
-        ...,
-        check_ssrf=False,
-        page_ready_hook=login,
-        new_interval_sec=86400 * 7, # Default to weekly
-        stale_factor=1.5
-    )
-    ```
+You can achieve this by combining `include_patterns` (navigation) with a custom `content_extract_hook` (payload).
+
+```python
+async def extract_article(page, response, url):
+    # If it's a listing page, return None. 
+    # The crawler will still find links, but won't save content/hash for this page.
+    if "/category/" in url:
+        return None 
+    
+    # If it's an article, extract the data
+    return await page.locator("article.main-content").inner_text()
+
+litecrawl(
+    ...,
+    include_patterns=[r"/category/", r"/article/"],
+    content_extract_hook=extract_article
+)
+```
+
+### 2. Structured Data & Change Detection
+
+`litecrawl` determines if a page is "fresh" by hashing the return value of your extraction hook. 
+*   If you return a **Dictionary**, the crawler automatically sorts the keys and dumps it to JSON before hashing. This ensures deterministic hashes.
+*   **Crucial:** Do not include timestamps, random numbers, or ad-rotation IDs in your returned dictionary. These will cause the hash to change on every run, tricking the scheduler into thinking the content is always "fresh," leading to aggressive over-crawling.
+
+```python
+async def structured_extract(page, response, url):
+    """
+    Extracts metadata. Returns a dict.
+    """
+    return {
+        "title": await page.title(),
+        "price": await page.locator(".price").inner_text(),
+        "stock": await page.locator(".stock-status").inner_text(),
+        # "scraped_at": time.time()  <-- WRONG! This breaks change detection.
+    }
+
+litecrawl(..., content_extract_hook=structured_extract)
+```
+
+### 3. The Downstream Hook
+
+This is where your data leaves the crawler. This hook is called *immediately* after the database is updated. It is the ideal place to push data to Kafka, S3, or an API.
+
+```python
+async def push_to_api(content, content_type, url, is_fresh, error_count):
+    """
+    content: The result from your content_extract_hook (e.g., the dict above)
+    is_fresh: True if content hash changed OR new links were found.
+    """
+    if is_fresh and content:
+        payload = {
+            "url": url,
+            "data": content, # This is the clean dict from step 2
+            "crawled_at": time.time() # Add timestamps HERE, not in extraction
+        }
+        await my_api_client.post("/ingest", json=payload)
+
+litecrawl(..., downstream_hook=push_to_api)
+```
+
+### 4. Custom Interaction (Login/Cookies)
+
+Use `page_ready_hook` to interact with the page before links or content are touched.
+
+```python
+async def handle_popups(page, response, url):
+    # Click generic "Accept Cookies" buttons
+    try:
+        await page.click("#accept-cookies-btn", timeout=2000)
+    except:
+        pass
+        
+    # Wait for a specific element to ensure dynamic content loaded
+    await page.wait_for_selector(".dynamic-content")
+
+litecrawl(..., page_ready_hook=handle_popups)
+```
 
 ## Operational Best Practices
 
