@@ -1,110 +1,119 @@
 # litecrawl
 
-Minimal asynchronous cron-friendly Playwright-based targeted web crawler.
+`litecrawl` is a minimal, asynchronous web crawler designed for targeted data acquisition. It sits in the operational middle ground: more robust than a simple loop of `requests.get()`, but significantly lighter than distributed systems like Scrapy Cluster or Apache Nutch.
 
-`litecrawl` is a single-file library built around `litecrawl()` / `litecrawl_async()` with all state in SQLite. It plays nicely with cron, job runners, or multiple workers sharing the same database.
+It is designed as a **tool, not a system**. It exposes a single, idempotent function that manages its own state via SQLite. It is intended to be invoked periodically (e.g., via cron) to incrementally build and maintain a dataset.
 
-## What it does
-- Crawls with headless Chromium using sensible defaults (viewport, headers, timeouts, resource blocking).
-- Keeps the frontier in SQLite with atomic claiming so multiple processes can cooperate safely.
-- Targets URLs via include/exclude/normalize patterns plus SSRF and robots.txt guard rails.
-- Adapts crawl frequency based on freshness (new links or content hash changes) vs. staleness.
-- Exposes hooks for page prep, link extraction, content extraction, and downstream handling.
+## Design Philosophy
+
+The architecture follows a "crash-only" software philosophy. It assumes the process will eventually terminate—whether by completion, error, or an external timeout—and ensures that the state remains consistent for the next run.
+
+1.  **State Persistence:** All crawl state (URLs, schedules, content hashes, error counts) is stored in a local SQLite database. This allows the crawler to be stopped and restarted at any time without data loss.
+2.  **Adaptive Scheduling:** Unlike simple scrapers that hit every URL on every run, `litecrawl` calculates a `next_crawl_time` for each page. It uses `fresh_factor` and `stale_factor` multipliers to revisit frequently changing pages often and stable pages rarely.
+3.  **Process Isolation:** By relying on an external scheduler (cron/systemd) and a strict timeout, memory leaks common in long-running browser processes are mitigated at the OS level.
+4.  **Resource Efficiency:** It uses `async_playwright` with shared contexts to execute JavaScript only when necessary, blocking bandwidth-heavy resources (images, fonts) by default.
 
 ## Installation
 
-```bash
-pip install litecrawl
-# or
-uv add litecrawl
+Requires Python 3.8+ and Playwright.
 
-# Install the Chromium browser bundle for Playwright
-python -m playwright install chromium
+```bash
+pip install aiosqlite playwright lxml
+playwright install chromium
 ```
 
-## Quick start
+## Quick Start
+
+Create a Python script (e.g., `crawler.py`) that calls the entry point. The function will initialize the database, claim a batch of URLs, process them, and exit.
 
 ```python
 from litecrawl import litecrawl
 
+# Define your configuration
 litecrawl(
-    sqlite_path="crawl.db",
-    start_urls=["https://news.ycombinator.com/"],
-    include_patterns=[r"ycombinator\.com"],
-    n_claims=50,        # pages to process per run
-    n_concurrent=5,     # browser tabs at a time
+    sqlite_path="company_news.db",
+    start_urls=["https://example.com/news"],
+    
+    # Only follow links matching these patterns
+    include_patterns=[r"https://example\.com/news/.*"],
+    
+    # Normalize URLs to avoid duplicates (e.g., strip tracking params)
+    normalize_patterns=[{"pattern": r"\?utm_source=.*", "replace": ""}],
+    
+    # Operational settings
+    n_concurrent=5,      # Parallel tabs
+    n_claims=100,        # Pages to process per run
+    fresh_factor=0.5,    # Re-crawl rapidly if content changes
+    stale_factor=2.0     # Back off if content is static
 )
 ```
 
-Run it on a schedule (example cron entry, once a minute with a 10m safety timeout):
+### Deployment via Cron
+
+To run the crawler continuously, set up a cron job. We wrap the execution in `timeout` to handle potential browser hangs or memory leaks gracefully.
 
 ```bash
-* * * * * /usr/bin/timeout 10m /usr/bin/python /path/to/crawler.py >> /var/log/crawl.log 2>&1
+# Run every minute. Kills the process if it exceeds 10 minutes.
+* * * * * /usr/bin/timeout 10m /usr/bin/python3 /path/to/crawler.py >> /var/log/crawl.log 2>&1
 ```
 
-## Hooks
-`litecrawl` handles navigation, scheduling, and link discovery. You own the business logic via hooks:
+## Core Features
 
-```python
-from pathlib import Path
-from litecrawl import litecrawl_async
+### 1. Robust Normalization & Discovery
+URLs are the primary key. `litecrawl` automatically standardizes URLs (sorting query parameters, stripping fragments) to prevent duplication. It creates a directed graph where `last_inlink_seen_time` helps prune orphaned pages that are no longer linked by the target site.
 
+### 2. Security (SSRF Protection)
+When configured with `check_ssrf=True` (default), the crawler performs DNS resolution to ensure it does not connect to private IP ranges (e.g., `127.0.0.1`, `10.0.0.0/8`). This is essential when running crawlers on infrastructure that has access to internal services.
 
-async def page_ready_hook(page, response, url):
-    # Click or wait for client-side content before parsing
-    try:
-        await page.click("#accept-cookies", timeout=1000)
-    except Exception:
-        pass
+### 3. Change Detection
+It computes a stable SHA-256 hash of the page content.
+*   **Fresh:** If the hash changes or new links are discovered, the page is marked "fresh," and the interval to the next crawl is reduced.
+*   **Stale:** If the hash remains identical, the interval is increased (backed off) to save resources.
 
+### 4. Hook System
+You can inject custom logic without modifying the core library:
 
-async def downstream_hook(content, content_type, url, fresh, error_count):
-    if fresh and isinstance(content, bytes) and "text/html" in content_type:
-        Path("pages").mkdir(exist_ok=True)
-        target = Path("pages") / "latest.html"
-        target.write_bytes(content)
+*   **`page_ready_hook`**: Run actions after the page loads but before extraction (e.g., clicking "Load More", logging in, handling cookie banners).
+*   **`link_extract_hook`**: Override default link discovery (e.g., extracting URLs from JSON blobs).
+*   **`content_extract_hook`**: Define exactly what data to save (e.g., returning a specific DOM element or a structured dict).
+*   **`downstream_hook`**: An async callback triggered immediately after a successful crawl. Use this to push data to an API, Kafka, or S3.
 
+## Use Case Examples
 
-async def main():
-    await litecrawl_async(
-        sqlite_path="crawl.db",
-        start_urls=["https://example.com/"],
-        include_patterns=[r"example\.com"],
-        page_ready_hook=page_ready_hook,
-        downstream_hook=downstream_hook,
+### The "News Monitor"
+Targeting a high-frequency news feed.
+*   **Strategy:** Aggressive `fresh_factor`, specific inclusion patterns.
+*   **Config:**
+    ```python
+    litecrawl(
+        ...,
+        fresh_factor=0.2,   # Check 5x more often if it changed
+        min_interval_sec=300,
+        include_patterns=[r"/breaking-news/"]
     )
+    ```
 
+### The "Intranet Archivist"
+Crawling internal documentation for search indexing.
+*   **Strategy:** Disable SSRF checks (to allow internal IPs), long intervals, authentication via hooks.
+*   **Config:**
+    ```python
+    async def login(page):
+        # Custom login logic
+        ...
 
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
-```
+    litecrawl(
+        ...,
+        check_ssrf=False,
+        page_ready_hook=login,
+        new_interval_sec=86400 * 7, # Default to weekly
+        stale_factor=1.5
+    )
+    ```
 
-Hook signatures:
-- `page_ready_hook(page: Page, response: Response | None, url: str) -> Awaitable[None]`
-- `link_extract_hook(page, response, url) -> Awaitable[list[str]]` (default: lxml-based extractor)
-- `content_extract_hook(page, response, url) -> Awaitable[Any]` (default: response body or cached HTML)
-- `downstream_hook(content, content_type, url, fresh, error_count) -> Awaitable[None]`
+## Operational Best Practices
 
-## Key options (defaults in parentheses)
-- `start_urls`: seed URLs inserted if missing.
-- `normalize_patterns` (`None`): list of `{pattern, replace}` regex rules applied after normalization.
-- `include_patterns` / `exclude_patterns` (`None`): regex allow/deny gates for the frontier.
-- `n_claims` (100): rows to claim per run; `n_concurrent` (10): Playwright pages at once.
-- `check_robots_txt` (True) and `check_ssrf` (True): guard rails before fetching.
-- Playwright: `pw_headers` (User-Agent `litecrawl/0.6`), `pw_viewport` (1920x1080), `pw_timeout_ms` (15000), `pw_scroll_rounds` (1), `pw_scroll_wait_ms` (800), `pw_block_resources` (`{"image","font","media"}`).
-- Scheduling: `new_interval_sec` (24h), `min_interval_sec` (1h), `max_interval_sec` (30d), `fresh_factor` (0.2), `stale_factor` (2.0), `inlink_retention_sec` (30d), `error_threshold` (3), `processing_timeout_sec` (600s).
-
-## Scheduling & safety
-- SQLite stores the queue plus timing metadata; `BEGIN IMMEDIATE` locks ensure cooperative workers.
-- URLs are normalized and filtered before insertion; redirects are normalized and deduped.
-- SSRF guard rejects private/loopback/link-local IP targets (with hostname caching).
-- Robots.txt is cached per domain and checked before fetching when enabled.
-- Fresh pages (new links or new content hash) back off to `fresh_factor * interval` but not below `min_interval_sec`; stale pages back off using `stale_factor` up to `max_interval_sec`.
-- Stalled processing locks are cleaned up automatically after `processing_timeout_sec`.
-
-`normalize_and_validate_url` is available if you need to pre-process URLs yourself.
-
-## License
-
-MIT
+1.  **Concurrency:** Keep `n_concurrent` moderate (5-20). SQLite handles concurrency well, but high write contention from hundreds of workers on a single file can lead to locking issues.
+2.  **Database Management:** The `sqlite_path` is the only state. Backup this file to back up your crawl frontier.
+3.  **Logs:** The tool logs to standard python logging. Redirect stdout/stderr to a file in your cron definition to monitor progress.
+4.  **Partitioning:** If you need to crawl 10 distinct websites, it is often better to set up 10 separate cron entries with 10 separate SQLite files rather than one massive monolithic crawl. This isolates failures and simplifies configuration.
