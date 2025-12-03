@@ -1,140 +1,109 @@
 # litecrawl
 
-**A minimal, asynchronous, concurrency-safe web crawler.**
+Minimal asynchronous cron-friendly Playwright-based targeted web crawler.
 
-`litecrawl` is a single-interface Python library designed to crawl the modern web using Playwright and SQLite. It abandons complex distributed queues and heavy frameworks in favor of a single file, a single function, and a single database connection.
+`litecrawl` is a single-file library built around `litecrawl()` / `litecrawl_async()` with all state in SQLite. It plays nicely with cron, job runners, or multiple workers sharing the same database.
 
----
-
-## The Philosophy
-
-### 1. A Tool, Not a System
-Most crawling frameworks require you to inherit classes, define spiders, configure middleware settings, and manage a long-running process (daemon).
-
-`litecrawl` is a **tool**. It exposes one public function: `litecrawl()`.
-*   Need to crawl a news site every 10 minutes? Write a script and put it in `cron`.
-*   Need to scrape a competitor once a day? Write a script and put it in `cron`.
-*   Need to process 5 different domains with different rules? Run 5 different scripts.
-
-There is no "master process." The state is entirely contained in the SQLite database.
-
-### 2. The Database is the Queue
-External message brokers (Redis, RabbitMQ) add unnecessary complexity for datasets under a few million pages. `litecrawl` uses SQLite as both the frontier (URL queue) and the state machine.
-*   **Concurrency Safe:** Multiple processes can run `litecrawl()` against the same SQLite file simultaneously. The library uses `IMMEDIATE` transactions to claim rows atomically.
-*   **Persistent:** If the process crashes, the state is saved. If the machine reboots, the schedule remains.
-
-### 3. Render First, Optimize Later
-The modern web is dynamic. Static HTML parsers often miss content loaded via hydration or AJAX. `litecrawl` assumes **Playwright** is necessary by default.
-*   It manages a browser pool automatically.
-*   It handles aggressive resource blocking (fonts, images, media) to save bandwidth.
-*   It handles scrolling and network idle waits out of the box.
-
-### 4. Adaptive Scheduling
-Not all pages update at the same rate. `litecrawl` implements an adaptive scheduling algorithm:
-*   **Fresh Content:** If a page changes (hash mismatch) or contains new links, the crawl interval decreases (visits become more frequent).
-*   **Stale Content:** If a page is static, the crawl interval increases (visits become less frequent), saving resources.
-
----
+## What it does
+- Crawls with headless Chromium using sensible defaults (viewport, headers, timeouts, resource blocking).
+- Keeps the frontier in SQLite with atomic claiming so multiple processes can cooperate safely.
+- Targets URLs via include/exclude/normalize patterns plus SSRF and robots.txt guard rails.
+- Adapts crawl frequency based on freshness (new links or content hash changes) vs. staleness.
+- Exposes hooks for page prep, link extraction, content extraction, and downstream handling.
 
 ## Installation
 
 ```bash
-uv add litecrawl
-# or
 pip install litecrawl
+# or
+uv add litecrawl
+
+# Install the Chromium browser bundle for Playwright
+python -m playwright install chromium
 ```
 
-You must also install the Playwright browsers:
-
-```bash
-uv run playwright install chromium
-```
-
----
-
-## Usage
-
-### Minimal Example
-
-Create a file (e.g., `crawler.py`):
+## Quick start
 
 ```python
-import asyncio
 from litecrawl import litecrawl
 
-def main():
-    litecrawl(
-        sqlite_path="my_crawl.db",
-        start_urls=["https://news.ycombinator.com/"],
-        include_patterns=[r"ycombinator\.com"],
-        n_claims=50,       # Process 50 pages per run
-        n_concurrent=5,    # Open 5 browser tabs at a time
-    )
-
-if __name__ == "__main__":
-    main()
-```
-
-### Scheduled Execution (Recommended)
-
-Since `litecrawl` is designed to be a tool, you should schedule it using your system's scheduler (Cron, Systemd timers, Airflow).
-
-**Example Cron Entry (Run every minute):**
-```bash
-* * * * * /usr/bin/timeout 10m /usr/bin/python3 /path/to/crawler.py >> /var/log/crawl.log 2>&1
-```
-
-*Note: The `timeout` command is recommended to prevent process overlaps if a run hangs, though `litecrawl` includes internal safeguards against stale locks.*
-
----
-
-## Data Extraction
-
-`litecrawl` handles the navigation and scheduling. You handle the data extraction via **hooks**.
-
-```python
-async def my_page_hook(page):
-    """Click buttons or handle popups before parsing."""
-    try:
-        await page.click("#accept-cookies", timeout=1000)
-    except:
-        pass
-
-def my_transform_hook(content: bytes, content_type: str, url: str) -> bytes:
-    """Clean content before hashing (determines freshness)."""
-    if "text/html" in content_type:
-        # Return only the article body to ignore navigation/footer changes
-        return extract_article_body(content) 
-    return content
-
-def my_downstream_hook(content: bytes, content_type: str, url: str, fresh: bool):
-    """Save data to S3, Postgres, or JSON lines."""
-    if fresh:
-        save_to_s3(url, content)
-
 litecrawl(
-    ...,
-    page_hook=my_page_hook,
-    transform_hook=my_transform_hook,
-    downstream_hook=my_downstream_hook
+    sqlite_path="crawl.db",
+    start_urls=["https://news.ycombinator.com/"],
+    include_patterns=[r"ycombinator\.com"],
+    n_claims=50,        # pages to process per run
+    n_concurrent=5,     # browser tabs at a time
 )
 ```
 
----
+Run it on a schedule (example cron entry, once a minute with a 10m safety timeout):
 
-## Configuration
+```bash
+* * * * * /usr/bin/timeout 10m /usr/bin/python /path/to/crawler.py >> /var/log/crawl.log 2>&1
+```
 
-| Parameter | Purpose |
-| :--- | :--- |
-| `sqlite_path` | Path to the SQLite DB (auto-created). |
-| `start_urls` | Seed URLs (inserted only if missing). |
-| `normalize_patterns` | Regex replacements to standardize URLs (e.g., stripping session IDs). |
-| `include/exclude_patterns` | Strict gating for which URLs are allowed in the frontier. |
-| `n_claims` | Batch size. How many pages to lock for this specific run. |
-| `n_concurrent` | Parallelism. How many browser tabs to open. |
-| `pw_block_media` | Speed up crawling by aborting image/font requests (Default: `True`). |
+## Hooks
+`litecrawl` handles navigation, scheduling, and link discovery. You own the business logic via hooks:
 
----
+```python
+from pathlib import Path
+from litecrawl import litecrawl_async
+
+
+async def page_ready_hook(page, response, url):
+    # Click or wait for client-side content before parsing
+    try:
+        await page.click("#accept-cookies", timeout=1000)
+    except Exception:
+        pass
+
+
+async def downstream_hook(content, content_type, url, fresh, error_count):
+    if fresh and isinstance(content, bytes) and "text/html" in content_type:
+        Path("pages").mkdir(exist_ok=True)
+        target = Path("pages") / "latest.html"
+        target.write_bytes(content)
+
+
+async def main():
+    await litecrawl_async(
+        sqlite_path="crawl.db",
+        start_urls=["https://example.com/"],
+        include_patterns=[r"example\.com"],
+        page_ready_hook=page_ready_hook,
+        downstream_hook=downstream_hook,
+    )
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```
+
+Hook signatures:
+- `page_ready_hook(page: Page, response: Response | None, url: str) -> Awaitable[None]`
+- `link_extract_hook(page, response, url) -> Awaitable[list[str]]` (default: lxml-based extractor)
+- `content_extract_hook(page, response, url) -> Awaitable[Any]` (default: response body or cached HTML)
+- `downstream_hook(content, content_type, url, fresh, error_count) -> Awaitable[None]`
+
+## Key options (defaults in parentheses)
+- `start_urls`: seed URLs inserted if missing.
+- `normalize_patterns` (`None`): list of `{pattern, replace}` regex rules applied after normalization.
+- `include_patterns` / `exclude_patterns` (`None`): regex allow/deny gates for the frontier.
+- `n_claims` (100): rows to claim per run; `n_concurrent` (10): Playwright pages at once.
+- `check_robots_txt` (True) and `check_ssrf` (True): guard rails before fetching.
+- Playwright: `pw_headers` (User-Agent `litecrawl/0.6`), `pw_viewport` (1920x1080), `pw_timeout_ms` (15000), `pw_scroll_rounds` (1), `pw_scroll_wait_ms` (800), `pw_block_resources` (`{"image","font","media"}`).
+- Scheduling: `new_interval_sec` (24h), `min_interval_sec` (1h), `max_interval_sec` (30d), `fresh_factor` (0.2), `stale_factor` (2.0), `inlink_retention_sec` (30d), `error_threshold` (3), `processing_timeout_sec` (600s).
+
+## Scheduling & safety
+- SQLite stores the queue plus timing metadata; `BEGIN IMMEDIATE` locks ensure cooperative workers.
+- URLs are normalized and filtered before insertion; redirects are normalized and deduped.
+- SSRF guard rejects private/loopback/link-local IP targets (with hostname caching).
+- Robots.txt is cached per domain and checked before fetching when enabled.
+- Fresh pages (new links or new content hash) back off to `fresh_factor * interval` but not below `min_interval_sec`; stale pages back off using `stale_factor` up to `max_interval_sec`.
+- Stalled processing locks are cleaned up automatically after `processing_timeout_sec`.
+
+`normalize_and_validate_url` is available if you need to pre-process URLs yourself.
 
 ## License
 
