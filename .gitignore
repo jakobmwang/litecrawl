@@ -4,3 +4,4 @@ __pycache__
 .pytest_cache
 .uv-cache
 .venv
+pocs
