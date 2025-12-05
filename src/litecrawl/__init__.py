@@ -544,14 +544,19 @@ async def _process_page_inner(
                         final_content = await content_extract_hook(page, response, norm_url)
                     except Exception as exc:
                         logger.warning("content_extract_hook failed for %s: %s", norm_url, exc)
+                elif cached_html_bytes is not None:
+                    final_content = cached_html_bytes
+                elif "text/" in final_content_type:
+                    try:
+                        content_str = await page.content()
+                        final_content = content_str.encode("utf-8")
+                    except Exception:
+                        pass
                 else:
-                    if cached_html_bytes is not None:
-                        final_content = cached_html_bytes
-                    else:
-                        try:
-                            final_content = await response.body()
-                        except Exception:
-                            pass
+                    try:
+                        final_content = await response.body()
+                    except Exception:
+                        pass
 
         finally:
             # Always close page
