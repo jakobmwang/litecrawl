@@ -109,7 +109,7 @@ async def litecrawl_async(
     max_interval_sec: int = 60 * 60 * 24 * 30,
     fresh_factor: float = 0.2,
     stale_factor: float = 2.0,
-    inlink_retention_sec: int = 60 * 60 * 24 * 30,
+    inlink_retention_sec: int = 60 * 60 * 24 * 31,
     error_threshold: int = 3,
     processing_timeout_sec: int = 60 * 10,
 ) -> None:

@@ -87,7 +87,7 @@ To run the crawler continuously, set up a cron job. We wrap the execution in `ti
 | `new_interval_sec` | `int` | Initial crawl interval for newly discovered pages (default: 24h). |
 | `min_interval_sec` | `int` | Minimum time between crawls (floor). |
 | `max_interval_sec` | `int` | Maximum time between crawls (ceiling). |
-| `inlink_retention_sec`| `int` | Prune pages not seen in links for this duration (default: 30 days). |
+| `inlink_retention_sec`| `int` | Prune pages not seen in links for this duration (default: 31 days). |
 | `error_threshold` | `int` | Max consecutive errors before giving up on a page (default: 3). |
 | `processing_timeout_sec`| `int` | Safety timeout to unlock stuck pages (default: 10 mins). |
 
