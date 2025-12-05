@@ -1,11 +1,11 @@
 [project]
 name = "litecrawl"
-version = "0.6.0"
+version = "0.7.0"
 description = "Minimal asynchronous cron-friendly Playwright-based targeted web crawler."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
-authors = [{ name = "litecrawl maintainers" }]
+authors = [{ name = "Jakob M. Wang" }]
 dependencies = [
     "aiosqlite>=0.20.0",
     "lxml>=5.1.0",
