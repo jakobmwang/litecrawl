@@ -51,3 +51,14 @@ def test_normalize_respects_include_and_exclude():
     )
     assert allowed is not None
     assert blocked is None
+
+
+def test_normalize_rejects_unsupported_schemes():
+    result = normalize_and_validate_url(
+        url="ftp://example.com/file.txt",
+        base_url=None,
+        normalize_patterns=None,
+        include_patterns=None,
+        exclude_patterns=None,
+    )
+    assert result is None
