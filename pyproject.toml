@@ -1,6 +1,6 @@
 [project]
 name = "litecrawl"
-version = "0.6.0"
+version = "0.2.0"
 description = "Minimal asynchronous cron-friendly Playwright-based targeted web crawler"
 readme = "README.md"
 requires-python = ">=3.12"
