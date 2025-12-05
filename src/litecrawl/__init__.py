@@ -22,7 +22,7 @@ from playwright.async_api import BrowserContext, Page, Response, Route, async_pl
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_HEADERS = {"User-Agent": "litecrawl/0.2"}
+DEFAULT_HEADERS = {"User-Agent": "litecrawl"}
 DEFAULT_VIEWPORT = {"width": 2160, "height": 3840}
 DEFAULT_BLOCK_RESOURCES = {"image", "font", "media"}
 EMPTY_CONTENT_HASH = ""
