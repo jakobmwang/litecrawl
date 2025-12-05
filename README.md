@@ -82,19 +82,23 @@ To run the crawler continuously, set up a cron job. We wrap the execution in `ti
 | :--- | :--- | :--- |
 | `n_claims` | `int` | Maximum number of pages to process in one execution. |
 | `n_concurrent` | `int` | Number of parallel browser tabs. |
-| `fresh_factor` | `float` | Multiplier (< 1.0) to reduce interval if content changes (e.g., 0.5 = crawl twice as often). |
-| `stale_factor` | `float` | Multiplier (> 1.0) to increase interval if content is static (e.g., 2.0 = wait twice as long). |
+| `fresh_factor` | `float` | Multiplier (< 1.0) to reduce interval if content changes. |
+| `stale_factor` | `float` | Multiplier (> 1.0) to increase interval if content is static. |
 | `new_interval_sec` | `int` | Initial crawl interval for newly discovered pages (default: 24h). |
 | `min_interval_sec` | `int` | Minimum time between crawls (floor). |
 | `max_interval_sec` | `int` | Maximum time between crawls (ceiling). |
+| `inlink_retention_sec`| `int` | Prune pages not seen in links for this duration (default: 30 days). |
+| `error_threshold` | `int` | Max consecutive errors before giving up on a page (default: 3). |
+| `processing_timeout_sec`| `int` | Safety timeout to unlock stuck pages (default: 10 mins). |
 
 ### Browser Control
 | Parameter | Type | Description |
 | :--- | :--- | :--- |
 | `pw_headers` | `dict` | HTTP headers (e.g., User-Agent, Cookies). |
-| `pw_viewport` | `dict` | Viewport size (default: 1080p). |
+| `pw_viewport` | `dict` | Viewport size (default: 4k vertical). |
 | `pw_block_resources` | `set` | Resource types to abort (default: `{"image", "font", "media"}`). |
 | `pw_scroll_rounds` | `int` | How many times to scroll to bottom before extracting (for infinite scroll). |
+| `pw_scroll_selector` | `str` | CSS selector to target for scrolling (default: `"body"`). |
 | `pw_timeout_ms` | `int` | Page load timeout in milliseconds. |
 
 ## Advanced Usage

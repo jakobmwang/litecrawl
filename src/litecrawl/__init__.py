@@ -18,7 +18,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 
 import aiosqlite
 from lxml import html
-from playwright.async_api import BrowserContext, Page, Response, Route, async_playwright
+from playwright.async_api import BrowserContext, Page, Response, Route, async_playwright, TimeoutError as PlaywrightTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +94,9 @@ async def litecrawl_async(
     check_robots_txt: bool = True,
     check_ssrf: bool = True,
     pw_headers: dict[str, str] | None = None,
-    pw_scroll_rounds: int = 1,
-    pw_scroll_wait_ms: int = 800,
+    pw_scroll_rounds: int = 3,
+    pw_scroll_timeout_ms: int = 800,
+    pw_scroll_selector: str = "body",
     pw_timeout_ms: int = 15000,
     pw_viewport: dict | None = None,
     pw_block_resources: set[str] | None = None,
@@ -185,7 +186,8 @@ async def litecrawl_async(
                         exclude_patterns=exclude_patterns,
                         check_ssrf=check_ssrf,
                         pw_scroll_rounds=pw_scroll_rounds,
-                        pw_scroll_wait_ms=pw_scroll_wait_ms,
+                        pw_scroll_timeout_ms=pw_scroll_timeout_ms,
+                        pw_scroll_selector=pw_scroll_selector,
                         pw_timeout_ms=pw_timeout_ms,
                         pw_block_resources=pw_block_resources,
                         page_ready_hook=page_ready_hook,
@@ -344,7 +346,8 @@ async def _process_page_inner(
     exclude_patterns: list[str] | None,
     check_ssrf: bool,
     pw_scroll_rounds: int,
-    pw_scroll_wait_ms: int,
+    pw_scroll_timeout_ms: int,
+    pw_scroll_selector: str,
     pw_timeout_ms: int,
     pw_block_resources: set[str],
     page_ready_hook: PageReadyHook | None,
@@ -411,134 +414,148 @@ async def _process_page_inner(
                 page_finalized = True
                 return
 
+        # Create the page
         page = await context.new_page()
-        page.set_default_timeout(pw_timeout_ms)
 
-        if pw_block_resources:
-            async def _route_handler(route: Route) -> None:
-                if route.request.resource_type in pw_block_resources:
-                    await route.abort()
-                else:
-                    await route.continue_()
-            await page.route("**/*", _route_handler)
-
-        # 1. NAVIGATION
-        response = None
         try:
-            response = await page.goto(norm_url)
-        except Exception as exc:
-            logger.warning("Failed to navigate %s: %s", norm_url, exc)
-        
-        is_success = response is not None and 200 <= response.status < 300
-        
-        if not is_success:
-            new_error_count = record.error_count + 1
-            if new_error_count < error_threshold:
-                # Soft error - backoff without finalization (just reschedule)
-                await page.close()
-                await _finalize_with_error(db, record, norm_url, new_error_count, 
-                                           stale_factor, max_interval_sec, new_interval_sec)
-                page_finalized = True
-                return
-            # Hard error - proceed to finalize with None content
-        
-        final_content = None
-        final_content_type = EMPTY_CONTENT_TYPE
-        new_links_found = False
-        
-        if is_success:
-            # Reset error count implicitly via finalization later
+            # Begin with the timeframe
+            page.set_default_timeout(pw_timeout_ms)
 
-            # Check Content-Type and Redirects
-            final_content_type = response.headers.get("content-type", EMPTY_CONTENT_TYPE).lower()
-            final_normalized = normalize_and_validate_url(
-                url=page.url,
-                base_url=None,
-                normalize_patterns=normalize_patterns,
-                include_patterns=include_patterns,
-                exclude_patterns=exclude_patterns,
-            )
-            
-            if final_normalized != norm_url:
-                # Handle Redirect
-                # 1. Finalize source as stub
-                await _finalize_page(
-                    db=db, record=record, norm_url=norm_url, content=None, content_type=EMPTY_CONTENT_TYPE,
-                    content_hash=EMPTY_CONTENT_HASH, fresh=False, downstream_hook=downstream_hook,
-                    new_interval_sec=new_interval_sec, min_interval_sec=min_interval_sec,
-                    max_interval_sec=max_interval_sec, fresh_factor=fresh_factor, 
-                    stale_factor=stale_factor, final_error_count=0
-                )
-                page_finalized = True # Logic for source is done
-                
-                if final_normalized and (not check_ssrf or await _is_safe_url(final_normalized)):
-                    # 2. Switch context to new URL
-                    record = await _ensure_page_record(db, final_normalized, claim_if_free=True)
-                    if not record:
-                         # Target busy, abort
-                        await page.close()
-                        return
-                    norm_url = record.norm_url
-                    page_finalized = False # Now working on the new URL
-                else:
-                    # Invalid redirect target
-                    await page.close()
+            if pw_block_resources:
+                async def _route_handler(route: Route) -> None:
+                    if route.request.resource_type in pw_block_resources:
+                        await route.abort()
+                    else:
+                        await route.continue_()
+                await page.route("**/*", _route_handler)
+
+            # 1. NAVIGATION
+            response = None
+            try:
+                response = await page.goto(norm_url)
+            except Exception as exc:
+                logger.warning("Failed to navigate %s: %s", norm_url, exc)
+
+            is_success = response is not None and 200 <= response.status < 300
+
+            if not is_success:
+                new_error_count = record.error_count + 1
+                if new_error_count < error_threshold:
+                    # Soft error - backoff without finalization (just reschedule)
+                    await _finalize_with_error(db, record, norm_url, new_error_count, 
+                                               stale_factor, max_interval_sec, new_interval_sec)
+                    page_finalized = True
                     return
+                # Hard error - proceed to finalize with None content
 
-            if pw_scroll_rounds > 0 and "text/html" in final_content_type:
-                await _perform_scrolls(page, pw_scroll_rounds, pw_scroll_wait_ms)
-            
-            if page_ready_hook:
-                try:
-                    await page_ready_hook(page, response, norm_url)
-                except Exception as exc:
-                    logger.warning("page_ready_hook failed for %s: %s", norm_url, exc)
+            final_content = None
+            final_content_type = EMPTY_CONTENT_TYPE
+            new_links_found = False
 
-            # 3. DISCOVERY
-            cached_html_bytes: bytes | None = None
-            found_links: list[str] = []
+            if is_success:
+                # Reset error count implicitly via finalization later
 
-            if link_extract_hook:
-                try:
-                    found_links = await link_extract_hook(page, response, norm_url)
-                except Exception as exc:
-                    logger.warning("link_extract_hook failed for %s: %s", norm_url, exc)
-
-            elif "text/html" in final_content_type:
-                try:
-                    content_str = await page.content()
-                    cached_html_bytes = content_str.encode("utf-8")
-                    found_links = _extract_links_default(cached_html_bytes)
-                except Exception:
-                    pass
-
-            if found_links:
-                new_links_found = await _batch_insert_links(
-                    db=db,
-                    source_url=norm_url,
-                    raw_links=found_links,
+                # Check Content-Type and Redirects
+                final_content_type = response.headers.get("content-type", EMPTY_CONTENT_TYPE).lower()
+                final_normalized = normalize_and_validate_url(
+                    url=page.url,
+                    base_url=None,
                     normalize_patterns=normalize_patterns,
                     include_patterns=include_patterns,
                     exclude_patterns=exclude_patterns,
-                    check_ssrf=check_ssrf
                 )
 
-            # 4. PAYLOAD
-            if content_extract_hook:
-                try:
-                    final_content = await content_extract_hook(page, response, norm_url)
-                except Exception as exc:
-                    logger.warning("content_extract_hook failed for %s: %s", norm_url, exc)
-            else:
-                if cached_html_bytes is not None:
-                    final_content = cached_html_bytes
-                else:
+                if final_normalized != norm_url:
+                    # Handle Redirect
+                    # 1. Finalize source as stub
+                    await _finalize_page(
+                        db=db, record=record, norm_url=norm_url, content=None, content_type=EMPTY_CONTENT_TYPE,
+                        content_hash=EMPTY_CONTENT_HASH, fresh=False, downstream_hook=downstream_hook,
+                        new_interval_sec=new_interval_sec, min_interval_sec=min_interval_sec,
+                        max_interval_sec=max_interval_sec, fresh_factor=fresh_factor, 
+                        stale_factor=stale_factor, final_error_count=0
+                    )
+                    page_finalized = True # Logic for source is done
+
+                    if final_normalized and (not check_ssrf or await _is_safe_url(final_normalized)):
+                        # Redirect Robots.txt Check
+                        if robots:
+                            can_fetch = await robots.can_fetch(final_normalized)
+                            if not can_fetch:
+                                # Treated as a persistent error to back off
+                                await _finalize_page(db, record, final_normalized, None, "", EMPTY_CONTENT_HASH, False, None,
+                                                     new_interval_sec, min_interval_sec, max_interval_sec, 
+                                                     fresh_factor, stale_factor, record.error_count + 1)
+                                page_finalized = True
+                                return
+
+                        # 2. Switch context to new URL
+                        record = await _ensure_page_record(db, final_normalized, claim_if_free=True)
+                        if not record:
+                             # Target busy, abort
+                            return
+                        norm_url = record.norm_url
+                        page_finalized = False # Now working on the new URL
+                    else:
+                        # Invalid redirect target
+                        return
+
+                if pw_scroll_rounds > 0 and "text/html" in final_content_type:
+                    await _perform_scrolls(page, pw_scroll_rounds, pw_scroll_timeout_ms, pw_scroll_selector)
+
+                if page_ready_hook:
                     try:
-                        final_content = await response.body()
+                        await page_ready_hook(page, response, norm_url)
+                    except Exception as exc:
+                        logger.warning("page_ready_hook failed for %s: %s", norm_url, exc)
+
+                # 3. DISCOVERY
+                cached_html_bytes: bytes | None = None
+                found_links: list[str] = []
+
+                if link_extract_hook:
+                    try:
+                        found_links = await link_extract_hook(page, response, norm_url)
+                    except Exception as exc:
+                        logger.warning("link_extract_hook failed for %s: %s", norm_url, exc)
+
+                elif "text/html" in final_content_type:
+                    try:
+                        content_str = await page.content()
+                        cached_html_bytes = content_str.encode("utf-8")
+                        found_links = _extract_links_default(cached_html_bytes)
                     except Exception:
                         pass
-        
-        await page.close()
+
+                if found_links:
+                    new_links_found = await _batch_insert_links(
+                        db=db,
+                        source_url=norm_url,
+                        raw_links=found_links,
+                        normalize_patterns=normalize_patterns,
+                        include_patterns=include_patterns,
+                        exclude_patterns=exclude_patterns,
+                        check_ssrf=check_ssrf
+                    )
+
+                # 4. PAYLOAD
+                if content_extract_hook:
+                    try:
+                        final_content = await content_extract_hook(page, response, norm_url)
+                    except Exception as exc:
+                        logger.warning("content_extract_hook failed for %s: %s", norm_url, exc)
+                else:
+                    if cached_html_bytes is not None:
+                        final_content = cached_html_bytes
+                    else:
+                        try:
+                            final_content = await response.body()
+                        except Exception:
+                            pass
+
+        finally:
+            # Always close page
+            await page.close()
 
         # 5. HASH & FINALIZE
         # Robust Freshness: Only update hash if content is present.
@@ -636,11 +653,13 @@ async def _batch_insert_links(
     
     # 2. Batch Update Existing (Retention)
     # We update last_inlink_seen_time for ALL found valid URLs
-    placeholders = ",".join("?" for _ in valid_urls)
-    await db.execute(
-        f"UPDATE pages SET last_inlink_seen_time = unixepoch() WHERE norm_url IN ({placeholders})",
-        list(valid_urls)
-    )
+    valid_urls = list(valid_urls)
+    for i in range(0, len(valid_urls), 500):
+        chunk = valid_urls[i:i+500]
+        await db.execute(
+            f"UPDATE pages SET last_inlink_seen_time = unixepoch() WHERE norm_url IN ({','.join('?' for _ in chunk)})",
+            chunk
+        )
     
     await db.commit()
     return inserted_count > 0
@@ -988,22 +1007,78 @@ def _calculate_next_interval(
     return int(min(prev_interval * stale_factor, max_interval_sec))
 
 
-async def _perform_scrolls(page: Page, rounds: int, wait_ms: int) -> None:
+async def _perform_scrolls(page: Page, rounds: int, max_wait_ms: int, selector: str = "body") -> None:
+    # 1. Quick check if element exists
     try:
-        previous_height = await page.evaluate("document.body.scrollHeight")
+        if await page.locator(selector).count() == 0:
+            return
+    except Exception:
+        return
+
+    # 2. Get initial height
+    try:
+        previous_height = await page.evaluate(
+            "(sel) => { const el = document.querySelector(sel); return el ? el.scrollHeight : 0; }",
+            selector,
+        )
     except Exception:
         return
 
     for _ in range(max(rounds, 0)):
         try:
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(wait_ms)
-            
-            new_height = await page.evaluate("document.body.scrollHeight")
-            if new_height == previous_height:
+            # --- STEP A: AIM THE MOUSE ---
+            # Force hover to ensure the wheel event targets the correct container
+            await page.locator(selector).first.hover(force=True)
+
+            # --- STEP B: CALCULATE DISTANCE ---
+            delta_needed = await page.evaluate(
+                """(sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return 0;
+
+                    // Treat both BODY and HTML as the 'Global Window' scroll
+                    const isGlobal = el.tagName === 'BODY' || el.tagName === 'HTML';
+                    
+                    const currentScroll = isGlobal ? window.scrollY : el.scrollTop;
+                    const clientHeight = isGlobal ? window.innerHeight : el.clientHeight;
+
+                    // Distance to bottom + buffer
+                    return el.scrollHeight - currentScroll - clientHeight + 1000;
+                }""",
+                selector,
+            )
+
+            # If we are already effectively at the bottom, stop.
+            # We allow a small buffer (e.g., < 50px) because calculations aren't always pixel-perfect.
+            if delta_needed < 50:
                 break
-            previous_height = new_height
+
+            # --- STEP C: FLING ---
+            await page.mouse.wheel(0, int(delta_needed))
+
+            # --- STEP D: SMART WAIT ---
+            try:
+                await page.wait_for_function(
+                    """([sel, prev]) => {
+                        const el = document.querySelector(sel);
+                        if (!el) return false;
+                        return el.scrollHeight > prev;
+                    }""",
+                    [selector, previous_height],
+                    timeout=max_wait_ms,
+                    polling=200, # Low CPU usage
+                )
+            except PlaywrightTimeoutError:
+                break
+
+            # Update height for next round
+            previous_height = await page.evaluate(
+                "(sel) => { const el = document.querySelector(sel); return el ? el.scrollHeight : 0; }",
+                selector,
+            )
+
         except Exception:
+            # If anything crashes (locator triggers, browser disconnected), stop the loop.
             break
 
 
